@@ -137,7 +137,22 @@ class VllmEplbAdaptor:
 
         for local_idx, layer in enumerate(self.moe_layers):
             quant_type = QuantType.NONE if self.model.quant_config is None else layer.quant_type
-            expert_weight_key = (quant_type, get_ascend_config().enable_fused_mc2 == 1)
+            # MoERunner exposes weights through its RoutedExperts child.
+            get_parameter = (
+                layer.get_eplb_parameter if getattr_static(layer, "get_eplb_parameter", None) is not None else None
+            )
+            use_fused_weights = get_ascend_config().enable_fused_mc2 == 1
+            if quant_type == QuantType.NONE:
+                # An enabled switch can still select ordinary MoE on unsupported
+                # hardware/EP sizes. Follow the layout actually loaded.
+                try:
+                    w13 = get_parameter("w13_weight_list") if get_parameter is not None else layer.w13_weight_list
+                    w2 = get_parameter("w2_weight_list") if get_parameter is not None else layer.w2_weight_list
+                except AttributeError:
+                    use_fused_weights = False
+                else:
+                    use_fused_weights = isinstance(w13, list) and isinstance(w2, list)
+            expert_weight_key = (quant_type, use_fused_weights)
             if expert_weight_key[0] == QuantType.W4A8MXFP:
                 raise RuntimeError(f"EPLB not support {quant_type}")
             if expert_weight_key not in EPLB_EXPERT_WEIGHT_NAMES:
@@ -153,9 +168,6 @@ class VllmEplbAdaptor:
                 # The refactored MoERunner declares the accessor because its
                 # RoutedExperts child owns weights; legacy layers expose them
                 # directly.
-                get_parameter = (
-                    layer.get_eplb_parameter if getattr_static(layer, "get_eplb_parameter", None) is not None else None
-                )
                 self.param_dict[param_key] = get_parameter(name) if get_parameter is not None else getattr(layer, name)
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()

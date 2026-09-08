@@ -204,29 +204,56 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
         self.assertIs(weights.w2_scale[0], layer.w2_weight_scale)
         self.assertIsNone(weights.w1_scale_bias)
 
-    def test_get_fused_mc2_weights_fused_mc2_scale_flag(self):
+    def test_get_fused_mc2_weights_uses_megamoe_lists(self):
         method = self._make_method()
         layer = SimpleNamespace(
-            w13_weight=torch.randn(1, 8, 16),
-            fused_w1_scale=torch.randn(1, 8),
-            fused_w1_scale_bias=torch.tensor([], dtype=torch.float32),
-            w2_weight=torch.randn(1, 16, 8),
-            fused_w2_scale=torch.randn(1, 16),
-            fused_w2_scale_bias=torch.tensor([], dtype=torch.float32),
+            cann_mega_moe_w13_weight_list=[torch.zeros(8, 16, dtype=torch.int8)],
+            cann_mega_moe_fused_w1_scale_list=[torch.zeros(16, dtype=torch.int64)],
+            cann_mega_moe_w2_weight_list=[torch.zeros(16, 8, dtype=torch.int8)],
+            cann_mega_moe_fused_w2_scale_list=[torch.zeros(8, dtype=torch.int64)],
             activation="silu",
         )
         with (
             patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX",
-                SimpleNamespace(moe_comm_type=MoECommType.FUSED_MC2, use_mega_moe=False),
+                SimpleNamespace(moe_comm_type=MoECommType.FUSED_MC2),
             ),
             patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config") as mock_config,
         ):
             mock_config.return_value.enable_fused_mc2 = 1
             weights = method.get_fused_mc2_weights(layer)
-        self.assertIs(weights.w1_scale[0], layer.fused_w1_scale)
-        self.assertIs(weights.w1_scale_bias, layer.fused_w1_scale_bias)
-        self.assertIs(weights.w2_scale_bias, layer.fused_w2_scale_bias)
+        self.assertIs(weights.w1, layer.cann_mega_moe_w13_weight_list)
+        self.assertIs(weights.w2, layer.cann_mega_moe_w2_weight_list)
+        self.assertIs(weights.w1_scale, layer.cann_mega_moe_fused_w1_scale_list)
+        self.assertIs(weights.w2_scale, layer.cann_mega_moe_fused_w2_scale_list)
+        self.assertIsNone(weights.w1_scale_bias)
+        self.assertIsNone(weights.w2_scale_bias)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX")
+    def test_fused_mc2_eplb_scales_remain_views(self, mock_ctx, mock_config):
+        mock_config.return_value.enable_fused_mc2 = 1
+        mock_ctx.moe_comm_type = MoECommType.FUSED_MC2
+        method = self._make_method(use_expert_weight_list=True)
+        layer = SimpleNamespace(
+            activation="silu",
+            w13_weight_list=[torch.zeros(2, 4, dtype=torch.int8)],
+            w2_weight_list=[torch.zeros(4, 2, dtype=torch.int8)],
+            fused_w1_scale_list=[torch.arange(4, dtype=torch.int64).reshape(1, 4)],
+            fused_w2_scale_list=[torch.arange(2, dtype=torch.int64).reshape(1, 2)],
+        )
+        weights = method.get_fused_mc2_weights(layer)
+        self.assertIs(weights.w1, layer.w13_weight_list)
+        self.assertIs(weights.w2, layer.w2_weight_list)
+        self.assertIsNone(weights.w1_scale_bias)
+        self.assertIsNone(weights.w2_scale_bias)
+        for actual, source in (
+            (weights.w1_scale, layer.fused_w1_scale_list),
+            (weights.w2_scale, layer.fused_w2_scale_list),
+        ):
+            self.assertEqual(actual[0].ndim, 1)
+            source[0].add_(1)
+            torch.testing.assert_close(actual[0], source[0].reshape(-1))
 
     def test_get_fused_mc2_weights_expert_list_form(self):
         method = self._make_method(use_expert_weight_list=True)

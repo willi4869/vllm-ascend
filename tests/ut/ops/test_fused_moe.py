@@ -233,9 +233,8 @@ def test_ascend_routed_experts_initializes_only_matching_eplb_path(
     assert init_eplb.call_count == legacy_init_calls
 
 
-def test_process_weights_after_loading_uses_version_specific_layout(
-    monkeypatch,
-):
+@pytest.mark.parametrize("enable_fused_mc2", [0, 1])
+def test_process_weights_after_loading_uses_version_specific_layout(monkeypatch, enable_fused_mc2):
     method = _build_unquantized_method()
     layer = _build_weight_layer()
     w13_loader = MagicMock()
@@ -244,9 +243,11 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     layer.w2_weight.weight_loader = w2_loader
     original_w13 = layer.w13_weight.detach().clone()
     original_w2 = layer.w2_weight.detach().clone()
-    ascend_config = SimpleNamespace(enable_fused_mc2=False)
+    ascend_config = SimpleNamespace(enable_fused_mc2=enable_fused_mc2)
 
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(routed_experts_module, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "maybe_trans_nz", lambda weight: weight)
     upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
     monkeypatch.setattr(
@@ -266,17 +267,17 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     assert layer.w2_weight.weight_loader is w2_loader
 
 
-def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch):
-    method = _build_unquantized_method(dynamic_eplb=True)
+@pytest.mark.parametrize("dynamic_eplb", [False, True])
+def test_process_weights_after_loading_splits_lists_for_megamoe(monkeypatch, dynamic_eplb):
+    method = _build_unquantized_method(dynamic_eplb=dynamic_eplb)
     layer = _build_weight_layer()
     num_experts = layer.w13_weight.shape[0]
     ascend_config = SimpleNamespace(enable_fused_mc2=1)
 
-    monkeypatch.setattr(routed_experts_module, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(routed_experts_module, "use_cann_megamoe", lambda _: True)
     monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
-    monkeypatch.setattr(routed_experts_module.torch_npu, "npu_format_cast", lambda weight, _: weight)
-    monkeypatch.setattr(routed_experts_module.torch.npu, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.npu, "empty_cache", lambda: None)
     upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
     monkeypatch.setattr(
         upstream_method_base,
@@ -291,6 +292,14 @@ def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch
     assert not hasattr(layer, "w2_weight")
     assert len(layer.w13_weight_list) == num_experts
     assert len(layer.w2_weight_list) == num_experts
+    weights = method.get_fused_mc2_weights(layer)
+    assert weights.w1 is layer.w13_weight_list
+    assert weights.w2 is layer.w2_weight_list
+    assert weights.w1_scale is weights.w2_scale is None
+    assert weights.w1_scale_bias is weights.w2_scale_bias is None
+    views = method.get_eplb_weight_views(layer)
+    assert views[0] is weights.w1
+    assert views[1] is weights.w2
 
 
 def test_update_expert_map_updates_routed_experts_and_manager():

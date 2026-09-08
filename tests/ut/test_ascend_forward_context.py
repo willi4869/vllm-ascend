@@ -15,6 +15,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -306,8 +307,10 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
+        (128, 64, MoECommType.FUSED_MC2),
         (128, 128, MoECommType.MC2),
         (4097, 8, MoECommType.FUSED_MC2),
+        (4097, 64, MoECommType.FUSED_MC2),
         (4097, 128, MoECommType.ALLTOALL),
     ],
 )
@@ -519,3 +522,41 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
         assert seen["config"] is vllm_config
 
     assert seen["inside"] is False
+
+
+@pytest.mark.parametrize("reason", [None, "hardware", "lora", "ep_size"])
+def test_fused_selector_respects_megamoe_constraints(monkeypatch, reason):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch, device_type=AscendDeviceType.A3, enable_fused_mc2=1, ep_world_size=65 if reason == "ep_size" else 8
+    )
+    config = _make_vllm_config()
+    if reason == "lora":
+        config.lora_config = object()
+    elif reason == "hardware":
+        monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
+
+    assert afc.use_cann_megamoe(config) is (reason is None)
+    for num_tokens, fallback in ((128, MoECommType.MC2), (129, MoECommType.ALLTOALL)):
+        expected = MoECommType.FUSED_MC2 if reason is None else fallback
+        assert afc._select_fused_or_capacity_moe_comm_method(num_tokens, config, 128) == expected
+
+
+@pytest.mark.parametrize(
+    "eligible,kv_role,expected", [(True, None, 4096), (True, "kv_consumer", 256), (False, None, 512)]
+)
+def test_mc2_capacity_uses_selected_backend_and_node_role(monkeypatch, eligible, kv_role, expected):
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: eligible)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=1,
+            enable_prefill_mc2=False,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        ),
+    )
+    config = _make_vllm_config(max_num_batched_tokens=5000, kv_role=kv_role)
+
+    afc.set_mc2_tokens_capacity(config, max_num_reqs=256 if kv_role else 5000, uniform_decode_query_len=1)
+
+    assert afc.get_mc2_tokens_capacity() == expected

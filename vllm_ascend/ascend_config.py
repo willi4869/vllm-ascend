@@ -30,22 +30,6 @@ from vllm_ascend.config_utils import config
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_MEGA_MOE_SUPPORTED = None
-
-
-def is_mega_moe_supported() -> bool:
-    """Whether the megamoe op is available at runtime.
-
-    Always read _MEGA_MOE_SUPPORTED through this accessor instead of
-    ``from ascend_config import _MEGA_MOE_SUPPORTED``: the global is rebound
-    during config init (AscendConfig._validate_user_input_ranges rolls back
-    megamoe), and a direct import binds a stale snapshot for the bool.
-    """
-    global _MEGA_MOE_SUPPORTED
-    if _MEGA_MOE_SUPPORTED is None:
-        _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-    return _MEGA_MOE_SUPPORTED
-
 
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
@@ -401,8 +385,7 @@ class AscendConfig:
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
-    # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num.
+    # This value is passed as CANN MegaMoe buffer's max_recv_token_num.
     # This is a reference value: if the actual per-rank received token
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
@@ -465,17 +448,6 @@ class AscendConfig:
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
         if self.enable_mc2_hierarchy_comm:
             self.mc2_comm_alg = "hierarchy"
-        # TODO(zzzzwwjj): Currently, there are many problems with the megamoe op.
-        # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
-        # to enable the megamoe for testing capabilities.
-        # These codes will be removed after megamoe is ready.
-        global _MEGA_MOE_SUPPORTED
-        if self.enable_fused_mc2 in (0, 1):
-            # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
-            _MEGA_MOE_SUPPORTED = False
-        elif self.enable_fused_mc2 == 2:
-            _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-            self.enable_fused_mc2 = 1
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
@@ -604,7 +576,7 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vc):
+        if self.enable_fused_mc2 == 1 and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."

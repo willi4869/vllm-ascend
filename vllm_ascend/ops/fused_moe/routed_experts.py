@@ -23,7 +23,6 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
-from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
@@ -41,7 +40,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedEx
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -105,24 +104,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         replace_parameter(layer, "w2_weight", w2_data)
 
-        # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
-        # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine/mega_moe operator is updated to support
-        # ND format (or other formats), remove this specific 'if' check and the forced
-        # npu_format_cast. At that point, the operator should be able to handle weights
-        # in their native format without explicit casting here.
-        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if enable_fused_mc2:
-            use_megamoe = use_cann_megamoe(get_current_vllm_config())
-            if not use_megamoe:
-                layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-                layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if use_megamoe or self.dynamic_eplb:
-                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                del layer.w13_weight
-                del layer.w2_weight
-                torch.npu.empty_cache()
+        if use_cann_megamoe(get_current_vllm_config()):
+            # MegaMoe consumes one weight tensor per local expert.
+            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            del layer.w13_weight
+            del layer.w2_weight
+            torch.npu.empty_cache()
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
@@ -164,33 +152,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         """Normalized weight payload for the FUSED_MC2 comm path."""
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
-        has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
-        if _EXTRA_CTX.use_mega_moe:
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = None
-            w2_scale = None
-            w1_scale_bias = None
-            w2_scale_bias = None
-        else:
-            if self.dynamic_eplb and not has_split_weight_lists:
-                logger.warning_once(
-                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                    "tensor lists. This may cause accuracy issues or communication hangs."
-                )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         return MoEWeights(
-            w1=w1,
-            w2=w2,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_scale_bias=w1_scale_bias,
-            w2_scale_bias=w2_scale_bias,
+            w1=w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight],
+            w2=w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight],
         )
 
     def get_mlp_weights(self, layer):

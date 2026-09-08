@@ -405,43 +405,22 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def get_fused_mc2_weights(self, layer):
         """Normalized weight payload for the FUSED_MC2 comm path."""
-        use_mega_moe = _EXTRA_CTX.use_mega_moe
-
         if self.use_expert_weight_list:
-            if use_mega_moe:
-                return MoEWeights(
-                    w1=layer.w13_weight_list,
-                    w2=layer.w2_weight_list,
-                    w1_scale=[t.reshape(-1) for t in layer.w13_weight_scale_list],
-                    w2_scale=[t.reshape(-1) for t in layer.w2_weight_scale_list],
-                    w1_scale_bias=[t.reshape(-1) for t in layer.w13_scale_bias_list],
-                    w2_scale_bias=[t.reshape(-1) for t in layer.w2_scale_bias_list],
-                )
-            else:
-                return MoEWeights(
-                    w1=[w.view(torch.int32) for w in layer.w13_weight_list],
-                    w2=[w.view(torch.int32) for w in layer.w2_weight_list],
-                    w1_scale=layer.w13_weight_scale_list,
-                    w2_scale=layer.w2_weight_scale_list,
-                    w1_scale_bias=layer.w13_scale_bias_list,
-                    w2_scale_bias=layer.w2_scale_bias_list,
-                )
-        if use_mega_moe:
             return MoEWeights(
-                w1=layer.cann_mega_moe_w13_weight_list,
-                w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
-                w2=layer.cann_mega_moe_w2_weight_list,
-                w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
-                w1_scale_bias=layer.cann_mega_moe_w13_scale_bias_list,
-                w2_scale_bias=layer.cann_mega_moe_w2_scale_bias_list,
+                w1=layer.w13_weight_list,
+                w2=layer.w2_weight_list,
+                w1_scale=[t.reshape(-1) for t in layer.w13_weight_scale_list],
+                w2_scale=[t.reshape(-1) for t in layer.w2_weight_scale_list],
+                w1_scale_bias=[t.reshape(-1) for t in layer.w13_scale_bias_list],
+                w2_scale_bias=[t.reshape(-1) for t in layer.w2_scale_bias_list],
             )
         return MoEWeights(
-            w1=[layer.w13_weight],
-            w2=[layer.w2_weight],
-            w1_scale=[layer.w13_weight_scale],
-            w2_scale=[layer.w2_weight_scale],
-            w1_scale_bias=[layer.w13_scale_bias.detach()] if hasattr(layer, "w13_scale_bias") else None,
-            w2_scale_bias=[layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None,
+            w1=layer.cann_mega_moe_w13_weight_list,
+            w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
+            w2=layer.cann_mega_moe_w2_weight_list,
+            w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
+            w1_scale_bias=layer.cann_mega_moe_w13_scale_bias_list,
+            w2_scale_bias=layer.cann_mega_moe_w2_scale_bias_list,
         )
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):

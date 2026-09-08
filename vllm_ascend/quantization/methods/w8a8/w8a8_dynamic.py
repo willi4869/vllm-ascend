@@ -275,8 +275,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         if get_ascend_config().enable_fused_mc2 == 1:
             layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
             layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
-            layer.fused_w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            layer.fused_w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
 
         if self.use_expert_weight_list:
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
@@ -339,9 +337,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             and get_ascend_config().enable_fused_mc2 == 1
             and act_name != "swigluoai_uninterleave"
         )
-        use_mega_moe = fused_scale_flag and _EXTRA_CTX.use_mega_moe
         if self.use_expert_weight_list:
-            if use_mega_moe:
+            if fused_scale_flag:
                 return MoEWeights(
                     w1=layer.w13_weight_list,
                     w2=layer.w2_weight_list,
@@ -354,12 +351,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 return MoEWeights(
                     w1=layer.w13_weight_list,
                     w2=layer.w2_weight_list,
-                    w1_scale=layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list,
-                    w2_scale=layer.fused_w2_scale_list if fused_scale_flag else layer.w2_weight_scale_list,
-                    w1_scale_bias=layer.fused_w1_scale_bias if fused_scale_flag else None,
-                    w2_scale_bias=layer.fused_w2_scale_bias if fused_scale_flag else None,
+                    w1_scale=layer.w13_weight_scale_fp32_list,
+                    w2_scale=layer.w2_weight_scale_list,
+                    w1_scale_bias=None,
+                    w2_scale_bias=None,
                 )
-        elif use_mega_moe:
+        elif fused_scale_flag:
             return MoEWeights(
                 w1=layer.cann_mega_moe_w13_weight_list,
                 w2=layer.cann_mega_moe_w2_weight_list,
@@ -371,10 +368,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         return MoEWeights(
             w1=[layer.w13_weight],
             w2=[layer.w2_weight],
-            w1_scale=[layer.fused_w1_scale] if fused_scale_flag else [layer.w13_weight_scale_fp32],
-            w2_scale=[layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale],
-            w1_scale_bias=layer.fused_w1_scale_bias if fused_scale_flag else None,
-            w2_scale_bias=layer.fused_w2_scale_bias if fused_scale_flag else None,
+            w1_scale=[layer.w13_weight_scale_fp32],
+            w2_scale=[layer.w2_weight_scale],
+            w1_scale_bias=None,
+            w2_scale_bias=None,
         )
 
     def get_mlp_weights(self, layer: torch.nn.Module) -> MoEWeights:

@@ -236,6 +236,47 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(list_layer.w13_weight_list[0].dtype, torch.int8)
         self.assertTrue(all(weight.storage_offset() == 0 for weight in list_layer.w13_weight_list))
 
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config", new=lambda: None)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", new=lambda _: True)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz", side_effect=identity)
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
+    def test_megamoe_weights_after_loading(self, mock_trans_nz):
+        for expert_lists in (False, True):
+            with self.subTest(expert_lists=expert_lists):
+                self.quant_method.use_expert_weight_list = expert_lists
+                layer = self.build_layer()
+                self.quant_method.process_weights_after_loading(layer)
+
+                weights = self.quant_method.get_fused_mc2_weights(layer)
+
+                for name, dtype in (
+                    ("w1", torch.int8),
+                    ("w2", torch.int8),
+                    ("w1_scale", torch.int64),
+                    ("w2_scale", torch.int64),
+                    ("w1_scale_bias", torch.float32),
+                    ("w2_scale_bias", torch.float32),
+                ):
+                    values = getattr(weights, name)
+                    self.assertEqual(len(values), self.experts)
+                    self.assertEqual(values[0].dtype, dtype)
+                    if name not in ("w1", "w2"):
+                        self.assertEqual(values[0].ndim, 1)
+                self.assertFalse(hasattr(layer, "w13_weight"))
+                self.assertFalse(hasattr(layer, "w2_weight"))
+                if expert_lists:
+                    self.assertIs(weights.w1, layer.w13_weight_list)
+                    self.assertIs(weights.w2, layer.w2_weight_list)
+                    for name, source_name in (
+                        ("w1_scale", "w13_weight_scale_list"),
+                        ("w2_scale", "w2_weight_scale_list"),
+                        ("w1_scale_bias", "w13_scale_bias_list"),
+                        ("w2_scale_bias", "w2_scale_bias_list"),
+                    ):
+                        source = getattr(layer, source_name)[0]
+                        source.add_(1)
+                        torch.testing.assert_close(getattr(weights, name)[0], source.reshape(-1))
+
     def test_pack_to_int32_asserts_packed_dim(self):
         weight = torch.zeros((self.experts, self.output_size, 10), dtype=torch.int8)
         expected_message = f"the last dim of weight needs to be divided by 4 but got shape {weight.shape}"

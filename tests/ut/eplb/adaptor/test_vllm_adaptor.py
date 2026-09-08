@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import torch
@@ -67,6 +68,31 @@ class TestVllmAdaptor(unittest.TestCase):
         self.assertIs(adaptor.expert_param_per_layer[0][0][0], self.mock_layer.w13_weight_list[0])
         self.assertIs(adaptor.expert_param_per_layer[0][0][1], self.mock_layer.w2_weight_list[0])
         self.mock_layer.get_eplb_parameter.assert_has_calls([call("w13_weight_list"), call("w2_weight_list")])
+
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_unquantized_non_megamoe_uses_tensor_layout(self, mock_get_config):
+        mock_get_config.return_value.enable_fused_mc2 = 1
+        for use_accessor in (False, True):
+            with self.subTest(use_accessor=use_accessor):
+                owner = SimpleNamespace(w13_weight=torch.randn(2, 4, 8), w2_weight=torch.randn(2, 8, 4))
+                layer = (
+                    SimpleNamespace(get_eplb_parameter=lambda name, owner=owner: getattr(owner, name))
+                    if use_accessor
+                    else owner
+                )
+                adaptor = VllmEplbAdaptor.__new__(VllmEplbAdaptor)
+                adaptor.model = SimpleNamespace(quant_config=None)
+                adaptor.moe_layers = [layer]
+                adaptor.num_local_experts = 2
+                adaptor.expert_weight_key_per_layer = {}
+                adaptor.expert_param_per_layer = {}
+
+                adaptor.init_expert_param_per_layer()
+
+                self.assertEqual(adaptor.expert_weight_key_per_layer[0], (QuantType.NONE, False))
+                self.assertIs(adaptor.param_dict["0.w13_weight"], owner.w13_weight)
+                self.assertIs(adaptor.param_dict["0.w2_weight"], owner.w2_weight)
+                self.assertEqual(len(adaptor.expert_param_per_layer[0]), 2)
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")

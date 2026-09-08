@@ -339,3 +339,57 @@ class TestMoECommMethod(TestBase):
             hidden_states=mock_apply_mlp.return_value[0],
             combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils.load_cann_mega_moe_ops")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
+    def test_fused_mc2_comm_impl_loads_megamoe_ops(
+        self, mock_token_dispatcher, mock_prepare_finalize, mock_load_megamoe_ops
+    ):
+        self.mock_ascend_config.enable_fused_mc2 = 1
+        self.moe_config.swiglu_limit = None
+        self.moe_config.swiglu_alpha = None
+        self.moe_config.swiglu_beta = None
+
+        mock_get_symm_buffer = MagicMock()
+        mock_megamoe = MagicMock()
+        mock_load_megamoe_ops.return_value = (mock_get_symm_buffer, mock_megamoe)
+
+        comm_impl = FusedMC2CommImpl(self.moe_config)
+
+        mock_token_dispatcher.assert_called_once_with()
+        mock_prepare_finalize.assert_called_once_with(self.moe_config)
+        mock_load_megamoe_ops.assert_called_once_with()
+        self.assertIs(comm_impl.get_symm_buffer_for_mega_moe, mock_get_symm_buffer)
+        self.assertIs(comm_impl.mega_moe, mock_megamoe)
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method._EXTRA_CTX")
+    def test_fused_mc2_comm_impl_uses_megamoe_path(self, mock_ctx):
+        comm_impl = FusedMC2CommImpl.__new__(FusedMC2CommImpl)
+        comm_impl.enable_fused_mc2 = 1
+        comm_impl.token_dispatcher = TokenDispatcherWithMC2.__new__(TokenDispatcherWithMC2)
+
+        routed_out = torch.randn(4, 8)
+        expert_tokens = torch.tensor([2, 2], dtype=torch.int32)
+        comm_impl._apply_cann_mega_moe = MagicMock(return_value=(routed_out, expert_tokens))
+        fused_experts_input = MagicMock(spec=MoEFusedExpertsInput)
+
+        for is_decode_only in (False, True):
+            for use_quant_method in (False, True):
+                with self.subTest(is_decode_only=is_decode_only, use_quant_method=use_quant_method):
+                    mock_ctx.is_decode_only_node = is_decode_only
+                    quant_method = MagicMock() if use_quant_method else None
+                    weights = (
+                        quant_method.get_fused_mc2_weights.return_value if quant_method else fused_experts_input.weights
+                    )
+                    comm_impl._apply_cann_mega_moe.reset_mock()
+
+                    result = comm_impl.fused_experts(fused_experts_input, quant_method=quant_method)
+
+                    if quant_method:
+                        quant_method.get_fused_mc2_weights.assert_called_once_with(fused_experts_input.layer)
+                    comm_impl._apply_cann_mega_moe.assert_called_once_with(
+                        fused_experts_input, weights, is_decode_only_node=is_decode_only
+                    )
+                    self.assertIs(result.routed_out, routed_out)
+                    self.assertIs(result.expert_tokens, expert_tokens)
